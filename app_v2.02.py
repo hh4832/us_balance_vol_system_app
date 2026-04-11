@@ -190,6 +190,7 @@ def flatten_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
     import pandas as pd
     import yfinance as yf
@@ -206,12 +207,7 @@ def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
             threads=False,
         )
 
-        print(f"[DEBUG] ticker={ticker}")
-        print(f"[DEBUG] columns={list(hist.columns) if hasattr(hist, 'columns') else None}")
-        print(f"[DEBUG] shape={hist.shape if hasattr(hist, 'shape') else None}")
-
         if hist is None or hist.empty:
-            print(f"[WARN] {ticker}: empty history")
             return None, None
 
         if isinstance(hist.columns, pd.MultiIndex):
@@ -219,12 +215,10 @@ def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
 
         missing = [c for c in required_cols if c not in hist.columns]
         if missing:
-            print(f"[WARN] {ticker}: missing {missing}, columns={list(hist.columns)}")
             return None, None
 
         hist = hist.dropna(subset=required_cols)
         if hist.empty:
-            print(f"[WARN] {ticker}: empty after dropna")
             return None, None
 
         prev_close = hist["Close"].iloc[-1]
@@ -239,10 +233,10 @@ def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
 
         return prev_close, atr
 
-    except Exception as e:
-        print(f"[ERROR] {ticker}: {e}")
+    except Exception:
         return None, None
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_intraday_price_10am(ticker: str) -> float:
     intraday = yf.download(
         ticker,
@@ -256,8 +250,11 @@ def get_intraday_price_10am(ticker: str) -> float:
 
     intraday = flatten_if_needed(intraday)
 
+    if intraday is None or intraday.empty:
+        return np.nan
+
     if "Close" not in intraday.columns:
-        raise ValueError(f"{ticker} intraday 缺少 Close 欄位，實際欄位={list(intraday.columns)}")
+        return np.nan
 
     intraday = intraday.dropna(subset=["Close"])
     if intraday.empty:
@@ -273,10 +270,7 @@ def get_intraday_price_10am(ticker: str) -> float:
     intraday.index = idx
     intraday = intraday.sort_index()
 
-    # 以美東時間的「今天」為準，不是用資料裡最新那天
     today_et = datetime.now(ZoneInfo(ET_TZ)).date()
-
-    # 只取今天資料
     day_df = intraday[intraday.index.date == today_et]
     if day_df.empty:
         return np.nan
