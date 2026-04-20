@@ -1,3 +1,4 @@
+# %load us_balance_vol_system_v2.05.py
 from __future__ import annotations
 
 from typing import Optional, Tuple
@@ -28,8 +29,8 @@ MATRIX_DAY1 = pd.DataFrame(
 )
 
 MARKET_TICKERS = ["QQQ", "SPY"]
-INTRADAY_INTERVAL = "5m"
-INTRADAY_PERIOD = "5d"
+INTRADAY_INTERVAL = "1m"
+INTRADAY_PERIOD = "7d"
 DAILY_PERIOD = "6mo"
 ET_TZ = "America/New_York"
 TARGET_TIME = "10:00"
@@ -191,6 +192,50 @@ def flatten_if_needed(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def get_prev_regular_close_from_intraday(ticker: str) -> float:
+    intraday = yf.download(
+        ticker,
+        period=INTRADAY_PERIOD,
+        interval=INTRADAY_INTERVAL,
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        prepost=False,
+    )
+
+    intraday = flatten_if_needed(intraday)
+
+    if intraday is None or intraday.empty or "Close" not in intraday.columns:
+        return np.nan
+
+    intraday = intraday.dropna(subset=["Close"])
+    if intraday.empty:
+        return np.nan
+
+    idx = intraday.index
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC").tz_convert(ET_TZ)
+    else:
+        idx = idx.tz_convert(ET_TZ)
+
+    intraday = intraday.copy()
+    intraday.index = idx
+    intraday = intraday.sort_index()
+
+    today_et = datetime.now(ZoneInfo(ET_TZ)).date()
+    prev_days = sorted({d for d in intraday.index.date if d < today_et})
+    if not prev_days:
+        return np.nan
+
+    prev_day = prev_days[-1]
+    prev_df = intraday[intraday.index.date == prev_day]
+    if prev_df.empty:
+        return np.nan
+
+    return float(prev_df["Close"].iloc[-1])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
     import pandas as pd
     import yfinance as yf
@@ -221,12 +266,28 @@ def get_prev_close_and_atr(ticker, period="3mo", interval="1d"):
         if hist.empty:
             return None, None
 
-        prev_close = hist["Close"].iloc[-1]
+        idx = hist.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC").tz_convert(ET_TZ)
+        else:
+            idx = idx.tz_convert(ET_TZ)
+        hist = hist.copy()
+        hist.index = idx
+        hist = hist.sort_index()
+
+        today_et = datetime.now(ZoneInfo(ET_TZ)).date()
+        hist_prev = hist[hist.index.date < today_et].copy()
+        if hist_prev.empty:
+            hist_prev = hist.copy()
+
+        prev_close = get_prev_regular_close_from_intraday(ticker)
+        if pd.isna(prev_close):
+            prev_close = hist_prev["Close"].iloc[-1]
 
         tr = pd.concat([
-            hist["High"] - hist["Low"],
-            (hist["High"] - hist["Close"].shift(1)).abs(),
-            (hist["Low"] - hist["Close"].shift(1)).abs(),
+            hist_prev["High"] - hist_prev["Low"],
+            (hist_prev["High"] - hist_prev["Close"].shift(1)).abs(),
+            (hist_prev["Low"] - hist_prev["Close"].shift(1)).abs(),
         ], axis=1).max(axis=1)
 
         atr = tr.rolling(14).mean().iloc[-1]
@@ -276,7 +337,12 @@ def get_intraday_price_10am(ticker: str) -> float:
         return np.nan
 
     target = pd.Timestamp(f"{today_et} {TARGET_TIME}", tz=ET_TZ)
-    eligible = day_df[day_df.index <= target]
+
+    exact_bar = day_df[day_df.index == target]
+    if not exact_bar.empty:
+        return float(exact_bar["Open"].iloc[-1])
+
+    eligible = day_df[day_df.index < target]
     if eligible.empty:
         return np.nan
 
